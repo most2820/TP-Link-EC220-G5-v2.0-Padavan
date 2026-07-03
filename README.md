@@ -15,6 +15,11 @@ Custom Padavan-ng firmware build for TP-Link EC220-G5 v2.0 (MT7620).
 | Hardware | Shortcut Forward Engine (hardware NAT offload) |
 | Build | Size-optimized firmware image (~0.5MB savings) |
 
+### Firmware Metadata
+- **Vendor:** TP-Link
+- **Product ID:** TL_EC220_G5-V2 (MT7620)
+- **Target:** Ralink RT3883/MT7620/MT7621/MT7628
+
 ## Included Features
 
 ### VPN
@@ -59,6 +64,13 @@ Custom Padavan-ng firmware build for TP-Link EC220-G5 v2.0 (MT7620).
 ## Build Configuration
 
 Key settings in `build.config`:
+
+### Target
+| Parameter | Value |
+|-----------|-------|
+| Vendor | TPLINK |
+| Product | MT7620 |
+| Firmware Product ID | TL_EC220_G5-V2 |
 
 ### CPU & Hardware
 | Option | Value | Description |
