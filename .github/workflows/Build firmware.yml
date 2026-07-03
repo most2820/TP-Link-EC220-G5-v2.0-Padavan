@@ -1,0 +1,156 @@
+name: Build firmware
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: registry.gitlab.com/hadzhioglu/padavan-ng
+    defaults: { run: { shell: bash } }
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get variables
+      run: |
+        sed -i 's|\r$||g' variables build.config
+        . <(cat variables build.config)
+        PADAVAN_THEMES="${PADAVAN_THEMES[*]}"
+        for v in "${!PADAVAN_@}" "${!CONFIG_@}"; do
+          echo "$v=${!v}" >> $GITHUB_ENV
+        done
+
+    - name: Download sources and toolchain
+      run: |
+        git config --global --add safe.directory '*'
+        git clone -b "$PADAVAN_BRANCH" "$PADAVAN_REPO"
+        git -C padavan-ng checkout "$PADAVAN_COMMIT"
+        wget -qO- "$PADAVAN_TOOLCHAIN_URL" | tar -C padavan-ng --zstd -xf -
+
+    - name: Install themes
+      run: |
+        if [[ -n $PADAVAN_THEMES ]]; then
+          git clone --depth 1 -b "$PADAVAN_THEMES_BRANCH" "$PADAVAN_THEMES_REPO" themes
+          cp -r themes/common-theme themes/jquery.js padavan-ng/trunk/user/www/n56u_ribbon_fixed
+
+          for theme in $PADAVAN_THEMES; do
+            echo "Installing $theme theme"
+            cp -r "themes/$theme-theme" padavan-ng/trunk/user/www/n56u_ribbon_fixed
+          done
+        fi
+
+    - name: Run custom pre-build script
+      run: '[[ -f pre-build.sh ]] && . pre-build.sh || :'
+
+    - name: Build firmware
+      run: |
+        cp build.config padavan-ng/trunk/.config
+        pushd padavan-ng/trunk
+        ./clear_tree.sh
+        ./build_firmware.sh
+        popd
+
+    - name: Run custom post-build script
+      run: '[[ -f post-build.sh ]] && . post-build.sh || :'
+
+    - name: Prepare artifacts
+      run: |
+        FW_FILE_NAME="$(find padavan-ng/trunk/images -type f -regextype posix-extended -iregex ".*\.(trx|bin)$" \
+                        -printf "%T@\t%f\n" | sort -V | tail -1 | cut -f2)"
+        cp "padavan-ng/trunk/images/$FW_FILE_NAME" .
+        
+        # Create 128KB empty file and recovery firmware
+        dd if=/dev/zero of=128kempty.bin bs=128k count=1
+        cat 128kempty.bin "$FW_FILE_NAME" > tp_recovery.bin
+        
+        # Download TFTP server
+        wget -O tftpd64.464.zip https://github.com/danayer/TP-Link-EC220-G5-v2.0-Padavan/releases/download/release-2025.04.22_02.07.51/tftpd64.464.zip
+        
+        FW_SIZE=$(stat -c %s "$FW_FILE_NAME")
+        echo "FW_FILE_NAME=$FW_FILE_NAME" >> $GITHUB_ENV
+        echo "FW_SIZE=$FW_SIZE" >> $GITHUB_ENV
+        echo "BUILD_TIMESTAMP=$(date '+%Y.%m.%d_%H.%M.%S')" >> $GITHUB_ENV
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        {
+          echo "## Padavan-ng TP-Link EC220-G5 v2.0"
+          echo ""
+          echo "### Firmware Info"
+          echo "- **Build:** ${{ env.BUILD_TIMESTAMP }}"
+          echo "- **Size:** $(numfmt --grouping ${{ env.FW_SIZE }} bytes)"
+          echo "- **Product ID:** ${{ env.CONFIG_FIRMWARE_PRODUCT_ID }}"
+          echo ""
+          echo "### Files"
+          echo "- \`$FW_FILE_NAME\` - Firmware image for web upgrade"
+          echo "- \`tp_recovery.bin\` - Recovery image for TFTP (128KB empty header + firmware)"
+          echo "- \`tftpd64.464.zip\` - TFTP server for recovery"
+          echo ""
+          echo "### Included Components"
+          echo "| Component | Status |"
+          echo "|-----------|--------|"
+          echo "| OpenVPN | Enabled |"
+          echo "| WireGuard | Enabled |"
+          echo "| AmneziaWG | Enabled |"
+          echo "| StrongSwan (IPsec) | Enabled |"
+          echo "| DNSCrypt | Enabled |"
+          echo "| Stubby (DoT) | Enabled |"
+          echo "| DoH Proxy | Enabled |"
+          echo "| Curl | Enabled |"
+          echo "| iPerf3 | Enabled |"
+          echo "| nfqws (zapret) | Enabled |"
+          echo "| Dropbear SSH | Enabled |"
+          echo "| ZRAM | Enabled |"
+          echo ""
+          echo "### Recovery Instructions"
+          echo "1. Set PC IP to \`192.168.0.66\`"
+          echo "2. Connect PC to LAN port 1"
+          echo "3. Power on router while holding Reset button for 5+ seconds"
+          echo "4. Use TFTP server to upload \`tp_recovery.bin\`"
+        } > release_notes.md
+        cat release_notes.md
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: padavan-ng_${{ env.CONFIG_VENDOR }}_${{ env.CONFIG_FIRMWARE_PRODUCT_ID }}_${{ env.BUILD_TIMESTAMP }}
+        retention-days: 7
+        path: |
+          ${{ env.FW_FILE_NAME }}
+          tp_recovery.bin
+          tftpd64.464.zip
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: release-${{ env.BUILD_TIMESTAMP }}
+        name: Padavan TP-Link EC220-G5 v2 (${{ env.BUILD_TIMESTAMP }})
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          ${{ env.FW_FILE_NAME }}
+          tp_recovery.bin
+          tftpd64.464.zip
+
+    - name: Check firmware size
+      run: |
+        partitions=padavan-ng/trunk/configs/boards/$CONFIG_VENDOR/$CONFIG_FIRMWARE_PRODUCT_ID/partitions.config
+        max_fw_size="$(awk '/Firmware/ { getline; getline; sub(",", ""); print strtonum($2); }' "$partitions")"
+        fw_size="$(stat -c %s "$FW_FILE_NAME")"
+
+        if ((fw_size > max_fw_size)); then
+          fw_size_fmtd="$(numfmt --grouping "$fw_size") bytes"
+          max_fw_size_fmtd="$(numfmt --grouping "$max_fw_size") bytes"
+          echo "::error::Firmware size ($fw_size_fmtd) exceeds max size ($max_fw_size_fmtd) for your target device"
+          exit 1
+        fi
+
+        echo "Firmware size: $(numfmt --grouping "$fw_size") bytes / $(numfmt --grouping "$max_fw_size") bytes"
